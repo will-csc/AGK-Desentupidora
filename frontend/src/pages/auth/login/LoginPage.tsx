@@ -11,13 +11,21 @@ export function LoginPage() {
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
+    setError("");
     setLoading(true);
-    await login(email, password);
-    navigate({ to: "/aula" });
+    try {
+      await login(email, password);
+      navigate({ to: "/aula" });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erro ao entrar.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -45,6 +53,11 @@ export function LoginPage() {
             placeholder="••••••••"
           />
         </div>
+        {error && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {error}
+          </div>
+        )}
         <Button type="submit" disabled={loading} className="w-full bg-brand-green text-brand-deep hover:bg-brand-green/90">
           {loading ? "Entrando..." : "Entrar"}
         </Button>

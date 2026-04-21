@@ -2,7 +2,7 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import { Logo } from "@/components/common/Logo";
 import { ThemeToggle } from "@/components/common/ThemeToggle";
 import { Button } from "@/components/ui/button";
-import { useAuth } from "@/lib/auth";
+import { ROLE_LABEL, useAuth } from "@/lib/auth";
 
 export function SiteHeader() {
   const { isAuthenticated, user, logout } = useAuth();
@@ -22,7 +22,7 @@ export function SiteHeader() {
           {isAuthenticated ? (
             <>
               <span className="hidden text-sm text-muted-foreground sm:block">
-                Olá, {user?.name}
+                Olá, {user?.name} ({user ? ROLE_LABEL[user.role] : ""})
               </span>
               <Button asChild variant="secondary" size="sm">
                 <Link to="/aula">Aula</Link>
