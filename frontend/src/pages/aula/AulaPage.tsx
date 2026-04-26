@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate } from "@tanstack/react-router";
 import {
   BookOpen,
@@ -17,11 +17,14 @@ import {
   Video,
   Wifi,
 } from "lucide-react";
+import { pdfjs, Document, Page } from "react-pdf";
+import pdfWorkerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import logo from "@/assets/logo-agk.jpeg";
 import { SiteHeader } from "@/components/layout/SiteHeader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { ROLE_LABEL, useAuth } from "@/lib/auth";
 
 type LiveSession = {
@@ -30,10 +33,13 @@ type LiveSession = {
 };
 
 const LIVE_SESSION_KEY = "agk_live_session";
+const DEFAULT_LIVE_STREAM_URL = "https://meet.jit.si/AGKDistribuidora";
 const DEFAULT_LIVE_SESSION: LiveSession = {
   isLive: false,
-  streamUrl: "",
+  streamUrl: DEFAULT_LIVE_STREAM_URL,
 };
+
+pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
 
 function readLiveSession(): LiveSession {
   if (typeof window === "undefined") return DEFAULT_LIVE_SESSION;
@@ -43,9 +49,14 @@ function readLiveSession(): LiveSession {
     if (!raw) return DEFAULT_LIVE_SESSION;
 
     const parsed = JSON.parse(raw) as Partial<LiveSession>;
+    const storedStreamUrl =
+      typeof parsed.streamUrl === "string" && parsed.streamUrl.trim().length > 0
+        ? parsed.streamUrl
+        : DEFAULT_LIVE_STREAM_URL;
+
     return {
       isLive: !!parsed.isLive,
-      streamUrl: typeof parsed.streamUrl === "string" ? parsed.streamUrl : "",
+      streamUrl: storedStreamUrl,
     };
   } catch {
     return DEFAULT_LIVE_SESSION;
@@ -57,18 +68,53 @@ function writeLiveSession(session: LiveSession) {
   localStorage.setItem(LIVE_SESSION_KEY, JSON.stringify(session));
 }
 
+function buildMeetingUrl(streamUrl: string) {
+  const trimmedUrl = streamUrl.trim();
+  if (!trimmedUrl) return "";
+
+  try {
+    const url = new URL(trimmedUrl);
+
+    if (url.hostname === "meet.jit.si") {
+      const hashParams = new URLSearchParams(url.hash.replace(/^#/, ""));
+      hashParams.set("config.enableClosePage", "false");
+      hashParams.set("config.prejoinPageEnabled", "false");
+      hashParams.set("config.disableDeepLinking", "true");
+      url.hash = hashParams.toString();
+    }
+
+    return url.toString();
+  } catch {
+    return trimmedUrl;
+  }
+}
+
 export function AulaPage() {
   const { isAuthenticated, user, ready } = useAuth();
   const isPresenter = user?.role === "presenter";
   const [liveSession, setLiveSession] = useState<LiveSession>(DEFAULT_LIVE_SESSION);
-  const apostilaPdfUrl = "";
+  const apostilaPdfUrl = "/apostila-atual-curso-dedet.pdf";
   const [pdfZoom, setPdfZoom] = useState(100);
+  const [pdfFileData, setPdfFileData] = useState<ArrayBuffer | null>(null);
+  const [pdfLoadError, setPdfLoadError] = useState("");
+  const [pdfTotalPages, setPdfTotalPages] = useState(0);
+  const [pdfPage, setPdfPage] = useState(1);
+  const [pdfPageInput, setPdfPageInput] = useState("1");
+  const [pdfPageSize, setPdfPageSize] = useState({ width: 0, height: 0 });
+  const [isDraggingPdf, setIsDraggingPdf] = useState(false);
+  const pdfViewportRef = useRef<HTMLDivElement | null>(null);
+  const pdfDragStateRef = useRef({
+    active: false,
+    startX: 0,
+    startY: 0,
+    scrollLeft: 0,
+    scrollTop: 0,
+  });
   const hasPdf = apostilaPdfUrl.trim().length > 0;
   const liveStreamUrl = liveSession.streamUrl.trim();
+  const meetingUrl = useMemo(() => buildMeetingUrl(liveStreamUrl), [liveStreamUrl]);
   const hasLiveStream = liveStreamUrl.length > 0;
-  const pdfViewerUrl = hasPdf
-    ? `${apostilaPdfUrl}#toolbar=0&navpanes=0&scrollbar=1&zoom=${pdfZoom}`
-    : "";
+  const pdfDocumentFile = useMemo(() => (pdfFileData ? { data: pdfFileData } : null), [pdfFileData]);
   const openPdfInNewTab = () => {
     if (!hasPdf) return;
     window.open(apostilaPdfUrl, "_blank", "noopener,noreferrer");
@@ -98,6 +144,61 @@ export function AulaPage() {
     return () => window.removeEventListener("storage", syncLiveSession);
   }, []);
 
+  useEffect(() => {
+    if (!hasPdf) {
+      setPdfFileData(null);
+      setPdfLoadError("");
+      setPdfTotalPages(0);
+      setPdfPageSize({ width: 0, height: 0 });
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadPdfFile = async () => {
+      try {
+        setPdfLoadError("");
+        setPdfFileData(null);
+        const response = await fetch(apostilaPdfUrl);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const bytes = await response.arrayBuffer();
+        if (!cancelled) {
+          setPdfFileData(bytes);
+        }
+      } catch {
+        if (!cancelled) {
+          setPdfFileData(null);
+          setPdfLoadError("Falhou ao carregar o PDF.");
+          setPdfTotalPages(0);
+          setPdfPageSize({ width: 0, height: 0 });
+        }
+      }
+    };
+
+    void loadPdfFile();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [apostilaPdfUrl, hasPdf]);
+
+  useEffect(() => {
+    setPdfPageInput(String(pdfPage));
+  }, [pdfPage]);
+
+  useEffect(() => {
+    const stopDragging = () => {
+      pdfDragStateRef.current.active = false;
+      setIsDraggingPdf(false);
+    };
+
+    window.addEventListener("mouseup", stopDragging);
+    return () => window.removeEventListener("mouseup", stopDragging);
+  }, []);
+
   const updateLiveSession = (nextSession: LiveSession) => {
     setLiveSession(nextSession);
     writeLiveSession(nextSession);
@@ -115,6 +216,46 @@ export function AulaPage() {
       ...liveSession,
       isLive: false,
     });
+  };
+
+  const startDraggingPdf = (event: React.MouseEvent<HTMLDivElement>) => {
+    const viewport = pdfViewportRef.current;
+    if (!viewport || !hasPdf) return;
+
+    pdfDragStateRef.current = {
+      active: true,
+      startX: event.clientX,
+      startY: event.clientY,
+      scrollLeft: viewport.scrollLeft,
+      scrollTop: viewport.scrollTop,
+    };
+    setIsDraggingPdf(true);
+  };
+
+  const moveDraggingPdf = (event: React.MouseEvent<HTMLDivElement>) => {
+    const viewport = pdfViewportRef.current;
+    const drag = pdfDragStateRef.current;
+    if (!viewport || !drag.active) return;
+
+    viewport.scrollLeft = drag.scrollLeft - (event.clientX - drag.startX);
+    viewport.scrollTop = drag.scrollTop - (event.clientY - drag.startY);
+  };
+
+  const stopDraggingPdf = () => {
+    pdfDragStateRef.current.active = false;
+    setIsDraggingPdf(false);
+  };
+
+  const applyPdfPage = (value: string) => {
+    if (!pdfTotalPages) {
+      setPdfPageInput(String(pdfPage));
+      return;
+    }
+
+    const parsedPage = Number.parseInt(value, 10);
+    const nextPage = Number.isNaN(parsedPage) ? pdfPage : Math.min(Math.max(parsedPage, 1), pdfTotalPages);
+    setPdfPage(nextPage);
+    setPdfPageInput(String(nextPage));
   };
 
   if (!ready) {
@@ -160,15 +301,15 @@ export function AulaPage() {
           </Badge>
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr]">
-          <Card className="overflow-hidden border-border/50 bg-card/60">
+        <div className="grid items-stretch gap-6 lg:grid-cols-[1.6fr_1fr]">
+          <Card className="h-full overflow-hidden border-border/50 bg-card/60">
             <div
               className="relative aspect-video overflow-hidden bg-[#050816]"
               style={{ background: "var(--gradient-hero)" }}
             >
               {hasLiveStream ? (
                 <iframe
-                  src={liveStreamUrl}
+                  src={meetingUrl}
                   title="Transmissão ao vivo"
                   className="absolute inset-0 h-full w-full"
                   allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
@@ -295,13 +436,32 @@ export function AulaPage() {
             </div>
           </Card>
 
-          <Card className="flex flex-col border-border/50 bg-card/60">
+          <Card className="flex h-full min-h-0 flex-col overflow-hidden border-border/50 bg-card/60">
             <div className="flex items-center justify-between gap-3 border-b border-border/50 p-4">
               <div className="flex items-center gap-2">
                 <BookOpen className="h-5 w-5 text-brand-green" />
                 <h2 className="font-display font-semibold">Apostila do Aluno</h2>
               </div>
               <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 rounded-md border border-border/60 bg-background/70 px-2 py-1">
+                  <span className="text-xs text-muted-foreground">Pagina</span>
+                  <Input
+                    value={pdfPageInput}
+                    onChange={(event) => setPdfPageInput(event.target.value.replace(/\D/g, "").slice(0, 4))}
+                    onBlur={(event) => applyPdfPage(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        applyPdfPage(pdfPageInput);
+                      }
+                    }}
+                    inputMode="numeric"
+                    className="h-7 w-16 border-0 bg-transparent px-1 text-center shadow-none focus-visible:ring-0"
+                    disabled={!hasPdf || !pdfTotalPages}
+                    aria-label="Pagina do PDF"
+                  />
+                  <span className="text-xs text-muted-foreground">/ {pdfTotalPages || "--"}</span>
+                </div>
                 <Button
                   type="button"
                   variant="outline"
@@ -355,14 +515,78 @@ export function AulaPage() {
                 </Button>
               </div>
             </div>
-            <div className="relative h-[640px] bg-muted/20">
+            <div
+              ref={pdfViewportRef}
+              className={`relative flex-1 overflow-auto bg-muted/20 select-none touch-none ${hasPdf ? (isDraggingPdf ? "cursor-grabbing" : "cursor-grab") : ""}`}
+              onMouseDown={startDraggingPdf}
+              onMouseMove={moveDraggingPdf}
+              onMouseUp={stopDraggingPdf}
+              onMouseLeave={stopDraggingPdf}
+              onDragStart={(event) => event.preventDefault()}
+            >
               {hasPdf ? (
-                <iframe
-                  key={pdfViewerUrl}
-                  src={pdfViewerUrl}
-                  title="Apostila em PDF"
-                  className="h-full w-full"
-                />
+                <>
+                  <div className="pointer-events-none absolute right-3 top-3 z-20 rounded-full bg-background/80 px-3 py-1 text-[11px] font-medium text-muted-foreground shadow-sm backdrop-blur">
+                    Arraste com o mouse para mover
+                  </div>
+                  <div
+                    className="pointer-events-none relative min-h-full min-w-full p-4"
+                    style={{
+                      minWidth: pdfPageSize.width ? `${pdfPageSize.width + 32}px` : undefined,
+                      minHeight: pdfPageSize.height ? `${pdfPageSize.height + 32}px` : undefined,
+                    }}
+                  >
+                    {pdfLoadError ? (
+                      <div className="rounded-lg bg-white px-6 py-10 text-center text-sm text-destructive shadow-sm">
+                        {pdfLoadError}
+                      </div>
+                    ) : !pdfDocumentFile ? (
+                      <div className="rounded-lg bg-white px-6 py-10 text-center text-sm text-muted-foreground shadow-sm">
+                        Carregando PDF...
+                      </div>
+                    ) : (
+                      <Document
+                        file={pdfDocumentFile}
+                        loading={
+                          <div className="rounded-lg bg-white px-6 py-10 text-center text-sm text-muted-foreground shadow-sm">
+                            Carregando PDF...
+                          </div>
+                        }
+                        error={
+                          <div className="rounded-lg bg-white px-6 py-10 text-center text-sm text-destructive shadow-sm">
+                            {pdfLoadError || "Falhou ao carregar o PDF."}
+                          </div>
+                        }
+                        onLoadSuccess={({ numPages }) => {
+                          setPdfLoadError("");
+                          setPdfTotalPages(numPages);
+                          setPdfPage((current) => Math.min(Math.max(current, 1), numPages));
+                        }}
+                        onLoadError={(error) => {
+                          setPdfLoadError(error.message || "Falhou ao carregar o PDF.");
+                          setPdfTotalPages(0);
+                          setPdfPageSize({ width: 0, height: 0 });
+                        }}
+                      >
+                        <Page
+                          pageNumber={pdfPage}
+                          scale={pdfZoom / 100}
+                          renderTextLayer={false}
+                          renderAnnotationLayer={false}
+                          className="rounded-lg bg-white shadow-sm"
+                          onLoadSuccess={(page) => {
+                            const viewport = page.getViewport({ scale: pdfZoom / 100 });
+                            setPdfPageSize({
+                              width: viewport.width,
+                              height: viewport.height,
+                            });
+                          }}
+                          loading={null}
+                        />
+                      </Document>
+                    )}
+                  </div>
+                </>
               ) : (
                 <div className="flex h-full flex-col items-center justify-center gap-4 p-6 text-center">
                   <div className="flex h-16 w-16 items-center justify-center rounded-full bg-brand-green/10">
